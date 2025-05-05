@@ -1,6 +1,9 @@
 package com.memory;
 
+import com.sun.management.OperatingSystemMXBean;
+
 import java.io.*;
+import java.lang.management.ManagementFactory;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.*;
@@ -46,51 +49,64 @@ public class Server2 {
             System.out.println("Клиент отключился: " + client.getRemoteSocketAddress());
         }
     }
-
     private static long[] readSwapInfo() {
-        String os = System.getProperty("os.name").toLowerCase();
-        if (os.contains("win")) {
-            long allocMB = 0, usageMB = 0;
-            ProcessBuilder pb = new ProcessBuilder("wmic", "pagefile", "list", "full");
-            pb.redirectErrorStream(true);
-            try {
-                Process p = pb.start();
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                    String line;
-                    while ((line = r.readLine()) != null) {
-                        line = line.trim();
-                        if (line.startsWith("AllocatedBaseSize=")) {
-                            allocMB = Long.parseLong(line.substring(line.indexOf('=') + 1));
-                        } else if (line.startsWith("CurrentUsage=")) {
-                            usageMB = Long.parseLong(line.substring(line.indexOf('=') + 1));
-                        }
-                    }
-                }
-                p.waitFor(3, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-            long totalBytes = allocMB * 1024L * 1024L;
-            long freeBytes  = (allocMB - usageMB) * 1024L * 1024L;
-            return new long[]{ totalBytes, freeBytes };
-        } else {
-            long total = -1, free = -1;
-            try (BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"))) {
-                String s;
-                while ((s = r.readLine()) != null) {
-                    if (s.startsWith("SwapTotal:")) {
-                        total = parseKbLine(s) * 1024L;
-                    } else if (s.startsWith("SwapFree:")) {
-                        free  = parseKbLine(s) * 1024L;
-                    }
-                    if (total >= 0 && free >= 0) break;
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            return new long[]{ total, free };
-        }
+        // Получаем «MXBean» с информацией о swap
+        OperatingSystemMXBean osBean =
+                ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
+
+        long totalSwap = osBean.getTotalSwapSpaceSize();  // байты
+        long freeSwap  = osBean.getFreeSwapSpaceSize();   // байты
+
+        return new long[]{ totalSwap, freeSwap };
     }
+//    private static long[] readSwapInfo() {
+//        String os = System.getProperty("os.name").toLowerCase();
+//        if (os.contains("win")) {
+//            long allocMB = 0, usageMB = 0;
+//            // Опрашиваем Win32_PageFileUsage для получения swap-информации
+//            ProcessBuilder pb = new ProcessBuilder(
+//                    "wmic", "path", "Win32_PageFileUsage",
+//                    "get", "AllocatedBaseSize,CurrentUsage", "/format:list"
+//            );
+//            pb.redirectErrorStream(true);
+//            try {
+//                Process p = pb.start();
+//                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+//                    String line;
+//                    while ((line = r.readLine()) != null) {
+//                        line = line.trim();
+//                        if (line.startsWith("AllocatedBaseSize=")) {
+//                            allocMB = Long.parseLong(line.substring(line.indexOf('=') + 1));
+//                        } else if (line.startsWith("CurrentUsage=")) {
+//                            usageMB = Long.parseLong(line.substring(line.indexOf('=') + 1));
+//                        }
+//                    }
+//                }
+//                p.waitFor(3, TimeUnit.SECONDS);
+//            } catch (Exception e) {
+//                e.printStackTrace();
+//            }
+//            long totalBytes = allocMB * 1024L * 1024L;
+//            long freeBytes  = (allocMB - usageMB) * 1024L * 1024L;
+//            return new long[]{ totalBytes, freeBytes };
+//        } else {
+//            long total = -1, free = -1;
+//            try (BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"))) {
+//                String s;
+//                while ((s = r.readLine()) != null) {
+//                    if (s.startsWith("SwapTotal:")) {
+//                        total = parseKbLine(s) * 1024L;
+//                    } else if (s.startsWith("SwapFree:")) {
+//                        free  = parseKbLine(s) * 1024L;
+//                    }
+//                    if (total >= 0 && free >= 0) break;
+//                }
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//            return new long[]{ total, free };
+//        }
+//    }
 
     private static long parseKbLine(String line) {
         String[] parts = line.split("\\s+");
