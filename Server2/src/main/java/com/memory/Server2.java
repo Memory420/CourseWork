@@ -49,64 +49,36 @@ public class Server2 {
             System.out.println("Клиент отключился: " + client.getRemoteSocketAddress());
         }
     }
+
+
     private static long[] readSwapInfo() {
-        // Получаем «MXBean» с информацией о swap
-        OperatingSystemMXBean osBean =
-                ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
+        String os = System.getProperty("os.name").toLowerCase();
 
-        long totalSwap = osBean.getTotalSwapSpaceSize();  // байты
-        long freeSwap  = osBean.getFreeSwapSpaceSize();   // байты
+        if (os.contains("win")) {
+            OperatingSystemMXBean mx =
+                    ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
 
-        return new long[]{ totalSwap, freeSwap };
+            long total = mx.getTotalSwapSpaceSize();
+            long free  = mx.getFreeSwapSpaceSize();
+            return new long[]{ total, free };
+        }
+
+        long total = -1, free = -1;
+        try (BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (line.startsWith("SwapTotal:")) {
+                    total = parseKbLine(line) * 1024L;
+                } else if (line.startsWith("SwapFree:")) {
+                    free  = parseKbLine(line) * 1024L;
+                }
+                if (total >= 0 && free >= 0) break;
+            }
+        } catch (IOException e) {
+            System.err.println("Не удалось прочитать /proc/meminfo: " + e.getMessage());
+        }
+        return new long[]{ total, free };
     }
-//    private static long[] readSwapInfo() {
-//        String os = System.getProperty("os.name").toLowerCase();
-//        if (os.contains("win")) {
-//            long allocMB = 0, usageMB = 0;
-//            // Опрашиваем Win32_PageFileUsage для получения swap-информации
-//            ProcessBuilder pb = new ProcessBuilder(
-//                    "wmic", "path", "Win32_PageFileUsage",
-//                    "get", "AllocatedBaseSize,CurrentUsage", "/format:list"
-//            );
-//            pb.redirectErrorStream(true);
-//            try {
-//                Process p = pb.start();
-//                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-//                    String line;
-//                    while ((line = r.readLine()) != null) {
-//                        line = line.trim();
-//                        if (line.startsWith("AllocatedBaseSize=")) {
-//                            allocMB = Long.parseLong(line.substring(line.indexOf('=') + 1));
-//                        } else if (line.startsWith("CurrentUsage=")) {
-//                            usageMB = Long.parseLong(line.substring(line.indexOf('=') + 1));
-//                        }
-//                    }
-//                }
-//                p.waitFor(3, TimeUnit.SECONDS);
-//            } catch (Exception e) {
-//                e.printStackTrace();
-//            }
-//            long totalBytes = allocMB * 1024L * 1024L;
-//            long freeBytes  = (allocMB - usageMB) * 1024L * 1024L;
-//            return new long[]{ totalBytes, freeBytes };
-//        } else {
-//            long total = -1, free = -1;
-//            try (BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"))) {
-//                String s;
-//                while ((s = r.readLine()) != null) {
-//                    if (s.startsWith("SwapTotal:")) {
-//                        total = parseKbLine(s) * 1024L;
-//                    } else if (s.startsWith("SwapFree:")) {
-//                        free  = parseKbLine(s) * 1024L;
-//                    }
-//                    if (total >= 0 && free >= 0) break;
-//                }
-//            } catch (IOException e) {
-//                e.printStackTrace();
-//            }
-//            return new long[]{ total, free };
-//        }
-//    }
 
     private static long parseKbLine(String line) {
         String[] parts = line.split("\\s+");
