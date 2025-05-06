@@ -10,18 +10,43 @@ import java.util.concurrent.*;
 
 public class Server2 {
     public static final int PORT = 6666;
-    private static final int MAX_CLIENTS = 5;
+    private static final int MAX_CLIENTS = 1;
+
+    private static final Semaphore clientSemaphore = new Semaphore(MAX_CLIENTS);
 
     public static void main(String[] args) throws IOException {
-        ExecutorService pool = Executors.newFixedThreadPool(MAX_CLIENTS);
         try (ServerSocket server = new ServerSocket(PORT)) {
             System.out.println("Server2 запущен на порту " + PORT);
             while (true) {
                 Socket client = server.accept();
-                pool.execute(() -> handleClient(client));
+                if (clientSemaphore.tryAcquire()) {
+                    new Thread(() -> {
+                        try {
+                            handleClient(client);
+                        } finally {
+                            clientSemaphore.release();
+                        }
+                    }).start();
+                } else {
+                    try (PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+                        out.println("Сервер переполнен. Попробуйте позже.");
+
+                    } catch (IOException ignored) {}
+                    client.close();
+                }
             }
         }
     }
+//    public static void main(String[] args) throws IOException {
+//        ExecutorService pool = Executors.newFixedThreadPool(MAX_CLIENTS);
+//        try (ServerSocket server = new ServerSocket(PORT)) {
+//            System.out.println("Server2 запущен на порту " + PORT);
+//            while (true) {
+//                Socket client = server.accept();
+//                pool.execute(() -> handleClient(client));
+//            }
+//        }
+//    }
 
     private static void handleClient(Socket client) {
         System.out.println("Клиент подключился: " + client.getRemoteSocketAddress());

@@ -12,7 +12,6 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
-import javax.crypto.spec.PSource;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -24,17 +23,20 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
 public class Server1 extends Application {
     public static final int PORT = 5555;
-    public static final int MAX_CLIENTS = 5;
+    public static final int MAX_CLIENTS = 1;
     private ServerSocket serverSocket;
     private ExecutorService clientPool;
     private final AtomicInteger connectedClients = new AtomicInteger(0);
     private final List<PrintWriter> clientOutputs = new CopyOnWriteArrayList<>();
     private Stage mainStage;
+
+    private final Semaphore clientSemaphore = new Semaphore(MAX_CLIENTS);
 
     public static void main(String[] args) {
         launch(args);
@@ -47,11 +49,6 @@ public class Server1 extends Application {
         label.setStyle("-fx-font-size: 20px; -fx-font-weight: bold;");
 
         Button exitButton = new Button("Выход");
-        exitButton.setOnAction(e -> {
-            System.out.println(stage.getWidth() + " " + stage.getHeight());
-            Platform.exit();
-            System.exit(0);
-        });
 
         VBox vbox = new VBox(20, label, exitButton);
         vbox.setAlignment(Pos.CENTER);
@@ -80,15 +77,27 @@ public class Server1 extends Application {
                 System.out.println("Сервер запущен на порту " + PORT);
                 while (!serverSocket.isClosed()) {
                     Socket client = serverSocket.accept();
-                    System.out.println("Клиент подключился: " + client.getInetAddress().getHostAddress());
-                    System.out.println("[INFO] Кол-во подключений: " + connectedClients.incrementAndGet());
-                    clientPool.execute(() -> {
-                        try {
-                            handleClient(client);
-                        } catch (IOException e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
+                    if (clientSemaphore.tryAcquire()) {
+                        System.out.println("Клиент подключился: " + client.getInetAddress().getHostAddress());
+                        System.out.println("[INFO] Кол-во подключений: " + connectedClients.incrementAndGet());
+
+                        clientPool.execute(() -> {
+                            try {
+                                handleClient(client);
+                            } catch (IOException e) {
+                                throw new RuntimeException(e);
+                            } finally {
+                                clientSemaphore.release();
+                                connectedClients.decrementAndGet();
+                            }
+                        });
+                    } else {
+                        System.out.println("Отклонено подключение от: " + client.getInetAddress().getHostAddress());
+                        try (PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+                            out.println("Сервер переполнен. Попробуйте позже.");
+                        } catch (IOException ignored) {}
+                        client.close();
+                    }
                 }
             } catch (IOException e) {
                 if (!serverSocket.isClosed()) {
@@ -98,7 +107,6 @@ public class Server1 extends Application {
         });
         serverThread.setDaemon(true);
         serverThread.start();
-        System.out.println("");
     }
 
     private void handleClient(Socket client) throws IOException {
@@ -187,10 +195,8 @@ public class Server1 extends Application {
     }
 
     private void addResizeFinishedListener(Stage stage, BiConsumer<Double, Double> onResized) {
-        // храним предыдущие размеры
         final double[] lastSize = { stage.getWidth(), stage.getHeight() };
 
-        // таймер, который сработает после паузы (200 мс)
         PauseTransition pause = new PauseTransition(Duration.millis(200));
         pause.setOnFinished(evt -> {
             double w = stage.getWidth(), h = stage.getHeight();

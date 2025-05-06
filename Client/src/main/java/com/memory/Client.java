@@ -6,8 +6,6 @@ import java.util.Scanner;
 
 public class Client {
     private static final String HOST = "localhost";
-    private static final int PORT_SERVER1 = 5555;
-    private static final int PORT_SERVER2 = 6666;
     private static final int RETRY_DELAY_MS = 100;
 
     public static void main(String[] args) {
