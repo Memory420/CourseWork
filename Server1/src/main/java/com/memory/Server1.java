@@ -16,9 +16,11 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.net.BindException;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.Arrays;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -29,14 +31,19 @@ import java.util.function.BiConsumer;
 
 public class Server1 extends Application {
     public static final int PORT = 5555;
-    public static final int MAX_CLIENTS = 1;
+    public static final int MAX_CLIENTS = 5;
+
     private ServerSocket serverSocket;
     private ExecutorService clientPool;
-    private final AtomicInteger connectedClients = new AtomicInteger(0);
-    private final List<PrintWriter> clientOutputs = new CopyOnWriteArrayList<>();
+    private final Semaphore clientSemaphore = new Semaphore(MAX_CLIENTS);
     private Stage mainStage;
 
-    private final Semaphore clientSemaphore = new Semaphore(MAX_CLIENTS);
+    private final AtomicInteger activeClients = new AtomicInteger(0);
+    private final List<ClientHandler> handlers = new CopyOnWriteArrayList<>();
+    private final List<PrintWriter> resizeSubscribers = new CopyOnWriteArrayList<>();
+
+    private static final DateTimeFormatter TIMESTAMP_FMT =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
 
     public static void main(String[] args) {
         launch(args);
@@ -44,186 +51,178 @@ public class Server1 extends Application {
 
     @Override
     public void start(Stage stage) {
-        mainStage = stage;
-        Label label = new Label("JavaFX работает!");
-        label.setStyle("-fx-font-size: 20px; -fx-font-weight: bold;");
+        this.mainStage = stage;
+        Label label = new Label("Server1");
+        label.setStyle("-fx-font-size: 18px; -fx-font-weight: bold;");
+        Button stopBtn = new Button("Остановить сервер");
+        stopBtn.setOnAction(e -> stopServer());
 
-        Button exitButton = new Button("Выход");
-
-        VBox vbox = new VBox(20, label, exitButton);
-        vbox.setAlignment(Pos.CENTER);
-
-        Scene scene = new Scene(vbox, 300, 200);
-        stage.setTitle("Проверка JavaFX");
-        stage.setScene(scene);
-        stage.setWidth(500);
-        stage.setHeight(400);
-        stage.centerOnScreen();
-
-        addResizeFinishedListener(stage, (w, h) ->
-                broadcast("Размер окна: " + w.intValue() + "×" + h.intValue(), null)
-        );
-
+        VBox root = new VBox(10, label, stopBtn);
+        root.setAlignment(Pos.CENTER);
+        stage.setScene(new Scene(root, 400, 200));
+        stage.setTitle("Server1");
         stage.show();
+
+        addResizeListener((w, h) -> {
+            String msg = String.format("Размер окна: %d×%d", w.intValue(), h.intValue());
+            broadcastToSubscribers(msg);
+        });
 
         startServer();
     }
 
     private void startServer() {
-        clientPool = Executors.newFixedThreadPool(MAX_CLIENTS);
-        Thread serverThread = new Thread(() -> {
+        clientPool = Executors.newCachedThreadPool();
+        new Thread(() -> {
             try {
                 serverSocket = new ServerSocket(PORT);
-                System.out.println("Сервер запущен на порту " + PORT);
-                while (!serverSocket.isClosed()) {
-                    Socket client = serverSocket.accept();
-                    if (clientSemaphore.tryAcquire()) {
-                        System.out.println("Клиент подключился: " + client.getInetAddress().getHostAddress());
-                        System.out.println("[INFO] Кол-во подключений: " + connectedClients.incrementAndGet());
+                System.out.println("Server1 listening on port " + PORT);
+            } catch (BindException be) {
+                System.err.println("Не удалось запустить сервер: порт " + PORT + " уже занят. Возможно, сервер уже запущен.");
+                Platform.runLater(Platform::exit);
+                return;
+            } catch (IOException ioe) {
+                System.err.println("Ошибка при создании ServerSocket: " + ioe.getMessage());
+                Platform.runLater(Platform::exit);
+                return;
+            }
 
-                        clientPool.execute(() -> {
-                            try {
-                                handleClient(client);
-                            } catch (IOException e) {
-                                throw new RuntimeException(e);
-                            } finally {
-                                clientSemaphore.release();
-                                connectedClients.decrementAndGet();
-                            }
-                        });
-                    } else {
-                        System.out.println("Отклонено подключение от: " + client.getInetAddress().getHostAddress());
-                        try (PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
-                            out.println("Сервер переполнен. Попробуйте позже.");
-                        } catch (IOException ignored) {}
+            while (!serverSocket.isClosed()) {
+                try {
+                    Socket client = serverSocket.accept();
+                    if (!clientSemaphore.tryAcquire()) {
+                        try (PrintWriter w = new PrintWriter(client.getOutputStream(), true)) {
+                            w.println(timestamp() + " Сервер переполнен. Попробуйте позже.");
+                        }
                         client.close();
+                        continue;
+                    }
+                    activeClients.incrementAndGet();
+                    ClientHandler h = new ClientHandler(client);
+                    handlers.add(h);
+                    clientPool.execute(h);
+                } catch (IOException e) {
+                    if (!serverSocket.isClosed()) {
+                        e.printStackTrace();
                     }
                 }
+            }
+        }, "Server-Acceptor").start();
+    }
+
+
+    @Override
+    public void stop() {
+        stopServer();
+    }
+
+    private class ClientHandler implements Runnable {
+        private final Socket socket;
+        private PrintWriter out;
+
+        ClientHandler(Socket socket) {
+            this.socket = socket;
+        }
+
+        @Override
+        public void run() {
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                out = new PrintWriter(socket.getOutputStream(), true);
+                send("Подключено. /subscribe, /unsubscribe, /getwindow, /rename <name>, /exit");
+                String id = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
+                String line;
+                while ((line = in.readLine()) != null) {
+                    String cmd = line.trim();
+                    System.out.println("[" + id + "] -> " + cmd);
+                    if ("/exit".equalsIgnoreCase(cmd)) {
+                        send("До свидания!");
+                        break;
+                    }
+                    handle(cmd);
+                }
             } catch (IOException e) {
-                if (!serverSocket.isClosed()) {
-                    e.printStackTrace();
-                }
+                System.err.println("Client error: " + e.getMessage());
+            } finally {
+                disconnect();
             }
-        });
-        serverThread.setDaemon(true);
-        serverThread.start();
-    }
+        }
 
-    private void handleClient(Socket client) throws IOException {
-        PrintWriter out = new PrintWriter(client.getOutputStream(), true);
-        clientOutputs.add(out);
-
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()))) {
-            out.println("Сервер принял подключение");
-
-            String clientAddress = client.getInetAddress().getHostAddress();
-            int clientPort = client.getPort();
-            String nickname = "[" + clientAddress + ":" + clientPort + "]";
-            String line;
-
-            while ((line = in.readLine()) != null) {
-                System.out.println("От клиента " + nickname + ": " + line);
-
-                handleCommand(line, out);
-
-                broadcast("Клиент " + nickname + ": " + line, out);
+        private void handle(String cmd) {
+            if (!cmd.startsWith("/")) {
+                send("Неверная команда. Введите /help");
+                return;
             }
-
-        } catch (IOException e) {
-            System.out.println("Ошибка клиента: " + e.getMessage());
-
-        } finally {
-            clientOutputs.remove(out);
-            out.close();
-
-            int now = connectedClients.decrementAndGet();
-            System.out.println("[INFO] Клиент отключился. Осталось подключений: " + now);
-
-            try {
-                client.close();
-            } catch (IOException ignore) {}
-        }
-    }
-
-    private void handleCommand(String command, PrintWriter out) {
-        if (!command.startsWith("/")) return;
-
-        List<String> details = Arrays.asList(command.trim().split("\\s+"));
-        System.out.println("[CMD] " + details);
-
-        switch (details.get(0)) {
-            case "/help":
-                out.println("/help");
-                out.println("/ping");
-                out.println("/getwindow");
-                out.println("/rename <name>");
-                break;
-            case "/ping":
-                broadcast("pong!", null);
-                break;
-
-            case "/getwindow":
-                broadcast("Размер окна: "
-                        + mainStage.getWidth() + "×" + mainStage.getHeight(), null);
-                break;
-
-            case "/rename":
-                if (details.size() < 2) {
-                    broadcast("Ошибка: /rename <новое имя>", null);
-                } else {
-                    String newTitle = details.get(1);
-                    Platform.runLater(() -> mainStage.setTitle(newTitle));
-                    broadcast("Имя окна изменено на " + newTitle, null);
-                }
-                break;
-
-            default:
-                broadcast("Неизвестная команда", null);
-                break;
-        }
-    }
-
-
-    private void broadcast(String message, PrintWriter sender) {
-        if (sender == null) {
-            System.out.println(message);
-        }
-        for (PrintWriter writer : clientOutputs) {
-            if (writer == sender) continue;
-            writer.println(message);
-        }
-    }
-
-    private void addResizeFinishedListener(Stage stage, BiConsumer<Double, Double> onResized) {
-        final double[] lastSize = { stage.getWidth(), stage.getHeight() };
-
-        PauseTransition pause = new PauseTransition(Duration.millis(200));
-        pause.setOnFinished(evt -> {
-            double w = stage.getWidth(), h = stage.getHeight();
-            if (w != lastSize[0] || h != lastSize[1]) {
-                lastSize[0] = w;
-                lastSize[1] = h;
-                onResized.accept(w, h);
+            String[] parts = cmd.split("\\s+", 2);
+            String base = parts[0].toLowerCase();
+            switch (base) {
+                case "/subscribe":
+                    if (!resizeSubscribers.contains(out)) resizeSubscribers.add(out);
+                    send("Подписка на resize оформлена");
+                    break;
+                case "/unsubscribe":
+                    resizeSubscribers.remove(out);
+                    send("Подписка отменена");
+                    break;
+                case "/getwindow":
+                    send(String.format("Размер окна: %d×%d",
+                            (int)mainStage.getWidth(), (int)mainStage.getHeight()));
+                    break;
+                case "/rename":
+                    if (parts.length < 2 || parts[1].isBlank()) {
+                        send("Ошибка: имя не может быть пустым");
+                    } else {
+                        String name = parts[1];
+                        try {
+                            Platform.runLater(() -> mainStage.setTitle(name));
+                            send("Успех: заголовок изменён на '" + name + "'");
+                        } catch (Exception ex) {
+                            send("Ошибка изменения заголовка: " + ex.getMessage());
+                        }
+                    }
+                    break;
+                case "/help":
+                    send("Команды: /subscribe, /unsubscribe, /getwindow, /rename <name>, /exit");
+                    break;
+                default:
+                    send("Неизвестная команда: " + base);
             }
-        });
+        }
 
-        ChangeListener<Number> listener = (obs, oldV, newV) -> pause.playFromStart();
+        private void send(String msg) {
+            out.println(timestamp() + " " + msg);
+        }
 
-        stage.widthProperty().addListener(listener);
-        stage.heightProperty().addListener(listener);
+        private void disconnect() {
+            if (out != null) resizeSubscribers.remove(out);
+            handlers.remove(this);
+            clientSemaphore.release();
+            activeClients.decrementAndGet();
+            try { socket.close(); } catch (IOException ignored) {}
+            System.out.println("Client disconnected. Active: " + activeClients.get());
+        }
     }
 
-    private void shutdownServer() {
-        try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close();
-                System.out.println("Сервер остановлен");
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
+    private void broadcastToSubscribers(String msg) {
+        String withTs = timestamp() + " " + msg;
+        for (PrintWriter pw : new CopyOnWriteArrayList<>(resizeSubscribers)) {
+            pw.println(withTs);
         }
-        if (clientPool != null) {
-            clientPool.shutdownNow();
-        }
+    }
+
+    private void stopServer() {
+        try { serverSocket.close(); clientPool.shutdownNow(); } catch (IOException ignored) {}
+        Platform.exit();
+    }
+
+    private void addResizeListener(BiConsumer<Double, Double> lst) {
+        PauseTransition pt = new PauseTransition(Duration.millis(200));
+        ChangeListener<Number> cl = (obs, o, n) -> pt.playFromStart();
+        pt.setOnFinished(e -> lst.accept(mainStage.getWidth(), mainStage.getHeight()));
+        mainStage.widthProperty().addListener(cl);
+        mainStage.heightProperty().addListener(cl);
+    }
+
+    private static String timestamp() {
+        return LocalDateTime.now().format(TIMESTAMP_FMT);
     }
 }

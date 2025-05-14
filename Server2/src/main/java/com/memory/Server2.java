@@ -4,20 +4,32 @@ import com.sun.management.OperatingSystemMXBean;
 
 import java.io.*;
 import java.lang.management.ManagementFactory;
+import java.net.BindException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.*;
 
 public class Server2 {
     public static final int PORT = 6666;
-    private static final int MAX_CLIENTS = 1;
+    private static final int MAX_CLIENTS = 2;
 
     private static final Semaphore clientSemaphore = new Semaphore(MAX_CLIENTS);
 
-    public static void main(String[] args) throws IOException {
-        try (ServerSocket server = new ServerSocket(PORT)) {
+    public static void main(String[] args) {
+        ServerSocket server = null;
+        try {
+            server = new ServerSocket(PORT);
             System.out.println("Server2 запущен на порту " + PORT);
-            while (true) {
+        } catch (BindException be) {
+            System.err.println("Не удалось запустить Server2: порт " + PORT + " уже занят. Возможно, сервер уже запущен.");
+            System.exit(1);
+        } catch (IOException ioe) {
+            System.err.println("Ошибка при создании ServerSocket: " + ioe.getMessage());
+            System.exit(1);
+        }
+
+        while (true) {
+            try {
                 Socket client = server.accept();
                 if (clientSemaphore.tryAcquire()) {
                     new Thread(() -> {
@@ -26,27 +38,24 @@ public class Server2 {
                         } finally {
                             clientSemaphore.release();
                         }
-                    }).start();
+                    }, "Server2-Worker").start();
                 } else {
                     try (PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
                         out.println("Сервер переполнен. Попробуйте позже.");
-
-                    } catch (IOException ignored) {}
+                    }
                     client.close();
                 }
+            } catch (IOException e) {
+                System.err.println("Ошибка в основном цикле Server2: " + e.getMessage());
+                if (server.isClosed()) break;
             }
         }
+
+        try {
+            server.close();
+        } catch (IOException ignored) {}
     }
-//    public static void main(String[] args) throws IOException {
-//        ExecutorService pool = Executors.newFixedThreadPool(MAX_CLIENTS);
-//        try (ServerSocket server = new ServerSocket(PORT)) {
-//            System.out.println("Server2 запущен на порту " + PORT);
-//            while (true) {
-//                Socket client = server.accept();
-//                pool.execute(() -> handleClient(client));
-//            }
-//        }
-//    }
+
 
     private static void handleClient(Socket client) {
         System.out.println("Клиент подключился: " + client.getRemoteSocketAddress());
@@ -80,12 +89,11 @@ public class Server2 {
         String os = System.getProperty("os.name").toLowerCase();
 
         if (os.contains("win")) {
-            OperatingSystemMXBean mx =
-                    ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
+            OperatingSystemMXBean mx = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
 
             long total = mx.getTotalSwapSpaceSize();
             long free  = mx.getFreeSwapSpaceSize();
-            return new long[]{ total, free };
+            return new long[] { total, free };
         }
 
         long total = -1, free = -1;
